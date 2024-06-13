@@ -1,0 +1,8 @@
+# This is the standardized gm setup file
+# for AutoGM V1
+---
+name: v1
+description: AutoGM Version 1
+commands: # list of special commands and
+  command: "[COMMAND]"
+  info: "[INFO]"

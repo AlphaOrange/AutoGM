@@ -1,0 +1,12 @@
+(Input) [COMMAND] Describe the group's current situation!
+(Answer) You wake up in the dark, with only a little light coming through the slits of an air shaft. As your eyes adjust to the darkness, you realize that you are lying in a chamber with shelves full of cleaning products and utensils. There is a closed metal door in one wall.
+(Input) Mitchell: I stand up an try to open the door.
+(Answer) The door is locked and doesn't move an inch.
+(Input) Eva: "Hello? Anybody hear? What is this?"
+(Answer) You don't hear any answer. But Mitchell, you think you hear someone breathing on the other side of the door.
+(Input) On the other side of the door sits a young guard called Carl who is not supposed to let anyone out of the room.
+(Answer) [OKAY]
+(Input) Mitchell: "Hey you, let us out!"
+(Answer) You hear a young voice from the other side of the door: "Sorry, but I get paid for this shit!"
+(Eva) I search the shelves for tools to open the air shaft.
+(Answer) You will find a small toolbox with some screwdrivers.
