@@ -16,7 +16,7 @@ AutoGM <- R6Class("AutoGM",
                    show_whole_protocol = FALSE),  # show everything from protocol (except system prompt)
 
     # Init AutoGM
-    initialize = function(gamebook, savegame, autogm = "v1", options = list()) {
+    initialize = function(gamebook, savegame, autogm = "Alice", options = list()) {
 
       if (!missing(gamebook)) {
 
@@ -170,12 +170,12 @@ AutoGM <- R6Class("AutoGM",
     .load_autogm = function(autogm) {
 
       # Load AutoGM version setup
-      self$gm <- read_yaml(file.path("versions", autogm, "setup.yaml"))
+      self$gm <- read_yaml(file.path("gamemasters", autogm, "setup.yaml"))
       self$gm[["_path"]] <- autogm
-      self$gm[["_template"]] <- readLines(file.path("versions", autogm, "system.tmpl")) %>% paste(collapse = "\n")
+      self$gm[["_template"]] <- readLines(file.path("gamemasters", autogm, "system.tmpl")) %>% paste(collapse = "\n")
 
-      # Find all gamebook files (.gbk) in versions folder
-      path <- file.path("versions", autogm)
+      # Find all gamebook files (.gbk) in gamemasters folder
+      path <- file.path("gamemasters", autogm)
       files <- list.files(path = path, pattern = "\\.gbk", recursive = TRUE)
 
       # Load gamebook files
