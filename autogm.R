@@ -92,10 +92,9 @@ AutoGM <- R6Class("AutoGM",
 
           # Event "save": no query
           } else if (str_to_lower(str_sub(input, 1, 5)) == "save ") {
-            self$protocol <- add_row(self$protocol, role = "event", content = "save")
             file <- str_sub(input, 6)
             self$save(file)
-            next
+            self$protocol <- add_row(self$protocol, role = "event", content = "save")
 
           # Special Command "redo": send query
           } else if (str_to_lower(input) == "redo" || str_to_lower(str_sub(input, 1, 5)) == "redo ") {
