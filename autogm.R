@@ -53,7 +53,7 @@ AutoGM <- R6Class("AutoGM",
       self$options <- modifyList(self$options, options)
 
       # start session
-      self$protocol <- add_row(self$protocol, role = "autogm", content = "session_start")
+      self$protocol <- add_row(self$protocol, role = "event", content = "session_start")
 
     },
 
@@ -64,8 +64,9 @@ AutoGM <- R6Class("AutoGM",
       private$.print()
 
       if (intro) {
-        input <- "[COMMAND] Shortly describe the group's current situation!"
-        private$.input(input)
+        content <- "[COMMAND] Shortly describe the group's current situation!" # TODO: put this in yaml
+        self$protocol <- add_row(self$protocol, role = "user", content = content)
+        private$.send()
         private$.print()
       }
 
@@ -74,35 +75,63 @@ AutoGM <- R6Class("AutoGM",
         # get user input
         input <- readline(">>> ")
 
+        # prepare for detection
+        regex_pcs <- paste0("^(", paste(str_escape(names(self$gamebook$pc)), collapse = "|"), "):? ") %>%
+          regex(ignore_case = TRUE)
+        regex_commands <- paste0("^(", paste(str_escape(self$gm$commands), collapse = "|"), ") ") %>%
+          regex(ignore_case = TRUE)
+        regex_simple_commands <- paste0("^(", paste(str_escape(names(self$gm$commands)), collapse = "|"), ") ") %>%
+          regex(ignore_case = TRUE)
+
         tryCatch({
 
-          # process top commands x, save, redo, help
+          # Event "x": no query, close app
           if (str_to_lower(input) == "x") {
-            self$protocol <- add_row(self$protocol, role = "autogm", content = "session_end")
+            self$protocol <- add_row(self$protocol, role = "event", content = "session_end")
             return(invisible(self$protocol))
-          }
-          if (str_to_lower(str_sub(input, 1, 5)) == "save ") {
+
+          # Event "save": no query
+          } else if (str_to_lower(str_sub(input, 1, 5)) == "save ") {
+            self$protocol <- add_row(self$protocol, role = "event", content = "save")
             file <- str_sub(input, 6)
             self$save(file)
             next
-          }
-          if (str_to_lower(input) == "redo" || str_to_lower(str_sub(input, 1, 5)) == "redo ") {
-            private$.redo(input)
-            next
-          }
-          if (str_to_lower(input) == "help") { # TODO: make this an outside message using system only
-            full_input <- "[COMMAND] Describe all commands that players can use and how they should write them. Keep it short and create your answer as a list. Explain the commands' meanings but don't write anything about how you are supposed to react to them."
-            temp_chat <- add_row(self$protocol[1,], role = "user", content = full_input)
-            answer <- query(temp_chat, screen = FALSE) # we only need system prompt for this
-            self$protocol <- self$protocol %>%
-              add_row(role = "special", content = "help") %>%
-              add_row(role = "special_answer", content = answer$message$content)
-            private$.print()
-            next
+
+          # Special Command "redo": send query
+          } else if (str_to_lower(input) == "redo" || str_to_lower(str_sub(input, 1, 5)) == "redo ") {
+            content <- str_match(input, regex("^redo ?(.*)$", ignore_case = TRUE))[1, 2]
+            self$protocol <- add_row(self$protocol, role = "redo", content = content)
+
+          # Special Command "help": add default content and send query
+          } else if (str_to_lower(input) == "help") {
+            self$protocol <- add_row(self$protocol, role = "help", content = "")
+
+          # Player commands: send query
+          } else if (str_detect(input, regex_pcs)) {
+            self$protocol <- add_row(self$protocol, role = "user", content = input)
+
+          # Version commands: send query
+          } else if (str_detect(input, regex_commands)) {
+            self$protocol <- add_row(self$protocol, role = "user", content = input)
+
+          # Simple GM commands (if allowed): switch to standard commands and send query
+          } else if (self$options$allow_simple_commands && str_detect(input, regex_simple_commands)) {
+            command <- str_match(regex_simple_commands)
+            content <- str_replace(input, regex_simple_commands, paste0(self$gm$commands[[command]], " "))
+            self$protocol <- add_row(self$protocol, role = "user", content = content)
+
+          # Direct commands (if allowed): add standard command and send query
+          } else if (self$options$allow_direct_commands) {
+            content <- paste(self$gm$commands$command, input)
+            self$protocol <- add_row(self$protocol, role = "user", content = content)
+
+          # Invalid input: no query
+          } else {
+            stop("Invalid input!")
           }
 
           # receive and print answer
-          private$.input(input)
+          private$.send()
           private$.print()
 
         }, error = function(e) private$.print_error(e$message),
@@ -208,90 +237,65 @@ AutoGM <- R6Class("AutoGM",
     # get clean chat from protocol
     .get_chat = function() {
 
-      # melt latest addendum if available into user request
-      protocol <- self$protocol
-      if (tail(protocol$role, 1) == "addendum") {
-        protocol$content[nrow(protocol) - 1] <- sprintf("%s\n\n(Note: %s)",
-                                                        protocol$content[nrow(protocol) - 1],
-                                                        protocol$content[nrow(protocol)])
-        protocol <- protocol[-nrow(protocol), ]
-      }
+      # find all to send
+      protocol <- self$protocol %>%
+        filter(send != "never"  & role %in% c("system", "user", "assistant"))
 
-      # filter for chat-relevant entries only
-      protocol %>% filter(role %in% c("system", "user", "assistant"))
+      # melt consecutive user entries
+      runs <- rle(protocol$role)
+      protocol$number <- rep(1:length(runs$lengths), runs$lengths)
+      protocol %>%
+        mutate(notes = duplicated(number)) %>%
+        mutate(content = ifelse(notes, paste0("(Note: ", content, ")"), content)) %>%
+        group_by(number) %>%
+        summarize(role = role[1], content = paste(content, collapse = "\n\n")) %>%
+        ungroup() %>%
+        select(role, content)
 
     },
 
     # send a message to llm
     .send = function() {
-      new_chat <- private$.get_chat()
-      answer <- query(new_chat, screen = FALSE)
-      self$protocol <- bind_rows(self$protocol, answer$message)
-    },
 
-    # send normal command
-    .input = function(input, remember = TRUE) {
+      chat <- self$protocol
 
-      # if simple commands allowed convert first
-      if (self$options$allow_simple_commands) {
-        for (command in names(self$gm$commands)) {
-          pattern <- paste0("^", command, " ")
-          if (str_detect(input, pattern)) {
-            input <- str_replace(input, pattern, paste0(self$gm$commands[[command]], " "))
-          }
+      # build system prompt
+      # TODO: this is for later when system gets additional info from advisor agent
+
+      # remove events
+      chat <- chat %>% filter(role != "event")
+
+      # handle redo: remove revised assistant, if redo: else: remove all redo
+      remove_assistant <- which(chat$role[-1] == "redo")
+      if (length(remove_assistant)) chat <- chat[-remove_assistant, ]
+      if (tail(chat$role, 1) == "redo") {
+        # current redo
+        last_user <- max(which(chat$role == "user"))
+        redo_text <- chat %>%
+          filter(row_number() > last_user) %>%
+          pull(content) %>%
+          paste(collapse = "\n")
+        if (redo_text != "") {
+          chat$content[last_user] <- paste0(
+            chat$content[last_user],
+            "\n\n[INFO] Additional Information: ", # TODO: put this template into yaml
+            redo_text)
         }
       }
+      chat <- chat %>% filter(role != "redo")
 
-      # check validity
-      valid <- FALSE
-      pattern_character <- paste0("^(", paste(names(self$gamebook$pc), collapse = "|"), "):? ") # accept lowercase
-      if (str_detect(input, regex(pattern_character, ignore_case = TRUE))) valid <- TRUE
-      pattern_commands <- paste0("^(", paste(private$quotemeta(self$gm$commands), collapse = "|"), ") ")
-      if (str_detect(input, pattern_commands)) valid <- TRUE
-
-      if (!valid) {
-        if (self$options$allow_direct_commands) {
-          input <- paste(self$gm$commands$command, input)
-        } else {
-          stop("Invalid input!")
-        }
+      # handle help: remove old help + assistant, current help to user
+      help_text <- "[COMMAND] Describe all commands that players can use and how they should write them. Keep it short and create your answer as a list. Explain the commands' meanings but don't write anything about how you are supposed to react to them."
+      remove_help <- which(chat$role == "help") %>% .[. != nrow(chat)] %>% c(., . + 1)
+      if (length(remove_help)) {
+        chat <- chat[-remove_help, ]
       }
+      chat <- chat %>%
+        mutate(content = ifelse(role == "help", !!help_text, content)) %>%
+        mutate(role = ifelse(role == "help", "user", role))
 
-      self$protocol <- add_row(self$protocol, role = "user", content = input)
-      private$.send()
-
-    },
-
-    # redo one prompt with or without addendum
-    .redo = function(input) {
-
-      if (nrow(self$protocol) < 2 ||
-           (!(all(tail(self$protocol$role, 2) == c("user", "assistant")) ||
-              all(tail(self$protocol$role, 2) == c("addendum", "assistant"))))) {
-        stop("You cannot do a redo at this moment!")
-      }
-
-      before_addendum <- tail(self$protocol$role, 2)[1] == "addendum"
-      addendum <- str_match(input, "^redo ?(.*)$")[1, 2]
-
-      if (before_addendum) {
-        self$protocol$role <- c(head(self$protocol$role, -3), c("hidden_user", "addendum", "hidden_assistant"))
-        if (addendum != "") {
-          addendum <- paste0(tail(self$protocol$content, 2)[1], "\n", addendum)
-        } else {
-          addendum <- tail(self$protocol$content, 2)[1]
-        }
-        self$protocol <- add_row(self$protocol, role = "user", content = tail(self$protocol$content, 3)[1])
-      } else {
-        self$protocol$role <- c(head(self$protocol$role, -2), c("hidden_user", "hidden_assistant"))
-        self$protocol <- add_row(self$protocol, role = "user", content = tail(self$protocol$content, 2)[1])
-      }
-      if (addendum != "") {
-        self$protocol <- add_row(self$protocol, role = "addendum", content = addendum)
-      }
-
-      private$.send()
-      private$.print()
+      answer <- query(chat, screen = FALSE)
+      self$protocol <- bind_rows(self$protocol, c(answer$message))
 
     },
 
@@ -302,34 +306,55 @@ AutoGM <- R6Class("AutoGM",
 
     # Print the chat history
     .print = function() {
-      if (self$options$show_whole_protocol) {
-        chat <- self$protocol
-      } else {
-        chat <- private$.get_chat()
-      }
+
+      # Remove system prompt
+      protocol <- self$protocol %>%
+        filter(role != "system")
+
+      # Determine visibility
+      protocol <- protocol %>%
+        mutate(show = ifelse(role == "user" |
+                             role == "assistant" & lag(role, 1, "") != "help" & lead(role, 1, "") != "redo" |
+                             row_number() >= n() - 1,
+                             TRUE, FALSE))
+
+      # Print protocol # TODO: this could be nice with all roles individually handled
       cat("\014") # Clear screen
-      for (i in seq_len(nrow(chat))) {
-        if (chat$role[i] == "user") {
-          cat(blue(chat$content[i]), "\n\n")
-        } else if (chat$role[i] == "assistant") {
-          cat("AutoGM:", chat$content[i], "\n\n")
-        } else if (chat$role[i] != "system") {
-          cat(white(chat$content[i]), "\n\n")
+      for (i in seq_len(nrow(protocol))) {
+        content <- protocol$content[i]
+        if (protocol$role[i] == "assistant") content <- paste("AutoGM:", content)
+        if (protocol$role[i] %in% c("redo", "help")) content <- paste(protocol$role[i], content)
+        if (!protocol$show[i]) {
+          if (self$options$show_whole_protocol) {
+            cat(white(content))
+          } else {
+            next
+          }
+        } else {
+          if (protocol$role[i] == "user") {
+            cat(blue(content))
+          } else if (protocol$role[i] == "assistant") {
+            cat(content)
+          } else {
+            cat(green(content))
+          }
         }
+        cat("\n\n")
       }
+
     },
 
-    # Print a note from the GM system
+    # Print a note from the GM system # TODO: this now clashes with event color / and never used
     .print_note = function(note) {
       cat(green(sprintf("%s\n\n", note)))
     },
 
     # Print an error from the GM system
     .print_error = function(note) {
-      cat(red(sprintf("%s\n", note)))
+      cat(red(sprintf("\n%s\n\n", note)))
     },
 
-    # Quote special characters for regex matching
+    # Quote special characters for regex matching TODO: where do we use this? use index()? or str_escape() instead
     quotemeta = function(string) {
       str_replace_all(string, "(\\W)", "\\\\\\1")
     }
@@ -348,3 +373,4 @@ gm$play()
 # Robert: "Hello?! Anybody here?"
 # Jill: I walk to the jungle to see if there is something to eat growing on the trees.
 
+# TODO: we need a good dialog template here and an alternative for play() which loops through stack
